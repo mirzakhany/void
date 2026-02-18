@@ -232,10 +232,7 @@ func applyDiagnostics(ed *gvcode.Editor, diagnostics []protocol.Diagnostic) {
 				continue
 			}
 		}
-		c := errorColor
-		if d.Severity == protocol.DiagnosticSeverityWarning {
-			c = warningColor
-		}
+		c := diagnosticSeverityColor(d.Severity)
 		decos = append(decos, decoration.Decoration{
 			Source:   lsp.DecorationSource,
 			Start:    start,
@@ -285,11 +282,7 @@ func layoutDiagnosticTooltip(gtx layout.Context, th *theme.Theme, d *protocol.Di
 	if msg == "" {
 		msg = "(no message)"
 	}
-	severityLabel := "Error"
-	if d.Severity == protocol.DiagnosticSeverityWarning {
-		severityLabel = "Warning"
-	}
-	sub := severityLabel
+	sub := diagnosticSeverityLabel(d.Severity)
 	if d.Source != "" {
 		sub += " · " + string(d.Source)
 	}
@@ -341,7 +334,37 @@ func layoutDiagnosticTooltip(gtx layout.Context, th *theme.Theme, d *protocol.Di
 var (
 	errorColor   = color.NRGBA{R: 0xf4, G: 0x43, B: 0x36, A: 0xff}
 	warningColor = color.NRGBA{R: 0xff, G: 0x98, B: 0x00, A: 0xff}
+	infoColor    = color.NRGBA{R: 0x42, G: 0xa5, B: 0xf5, A: 0xff} // muted blue
+	hintColor    = color.NRGBA{R: 0x78, G: 0x90, B: 0x9e, A: 0xff} // gray-blue
 )
+
+// diagnosticSeverityColor returns the squiggle color for the given LSP severity.
+func diagnosticSeverityColor(s protocol.DiagnosticSeverity) color.NRGBA {
+	switch s {
+	case protocol.DiagnosticSeverityWarning:
+		return warningColor
+	case protocol.DiagnosticSeverityInformation:
+		return infoColor
+	case protocol.DiagnosticSeverityHint:
+		return hintColor
+	default:
+		return errorColor
+	}
+}
+
+// diagnosticSeverityLabel returns the label shown in the tooltip for the given LSP severity.
+func diagnosticSeverityLabel(s protocol.DiagnosticSeverity) string {
+	switch s {
+	case protocol.DiagnosticSeverityWarning:
+		return "Warning"
+	case protocol.DiagnosticSeverityInformation:
+		return "Information"
+	case protocol.DiagnosticSeverityHint:
+		return "Hint"
+	default:
+		return "Error"
+	}
+}
 
 // buildColorSchemeFromChroma creates a gvcode ColorScheme from a chroma style.
 func buildColorSchemeFromChroma(mat *material.Theme, chromaStyle *chroma.Style) syntax.ColorScheme {
