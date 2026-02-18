@@ -1,0 +1,22 @@
+{
+  "servers": [
+    {
+      "languageId": "go",
+      "extensions": [".go"],
+      "command": "gopls",
+      "args": []
+    },
+    {
+      "languageId": "python",
+      "extensions": [".py"],
+      "command": "pylsp",
+      "args": []
+    },
+    {
+      "languageId": "typescript",
+      "extensions": [".ts", ".tsx"],
+      "command": "typescript-language-server",
+      "args": ["--stdio"]
+    }
+  ]
+}

@@ -1,250 +1,301 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"image/color"
+	"log"
 	"os"
+	"path/filepath"
+	"strings"
+	"unicode/utf8"
 
 	"gioui.org/layout"
-	"gioui.org/op"
-	"gioui.org/op/paint"
-	"gioui.org/text"
 	"gioui.org/unit"
-	"gioui.org/widget"
 	"gioui.org/widget/material"
-	"github.com/oligo/gioview/theme"
-	"github.com/oligo/gioview/view"
-	"github.com/oligo/gvcode"
-	wg "github.com/oligo/gvcode/widget"
-
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
+	"github.com/chapar-rest/uikit/tabs"
+	"github.com/chapar-rest/uikit/theme"
+	"github.com/mirzakhany/void/lsp"
+	"github.com/oligo/gvcode"
+	"github.com/oligo/gvcode/addons/completion"
+	gvcolor "github.com/oligo/gvcode/color"
+	"github.com/oligo/gvcode/textstyle/decoration"
+	"github.com/oligo/gvcode/textstyle/syntax"
+	wg "github.com/oligo/gvcode/widget"
+	"go.lsp.dev/protocol"
 )
+
+// completionWrapper wraps DefaultCompletion so that typing a trigger character (e.g. ".")
+// cancels the current session first. That forces a new session and a fresh LSP Suggest()
+// call, so we get member completions (e.g. fmt.Println after "fmt.").
+type completionWrapper struct {
+	*completion.DefaultCompletion
+	triggerChars map[string]bool
+}
+
+func (w *completionWrapper) OnText(ctx gvcode.CompletionContext) {
+	if w.triggerChars[ctx.Input] {
+		w.Cancel()
+	}
+	w.DefaultCompletion.OnText(ctx)
+}
+
+// buildFileView creates a fileView for the given path with editor, syntax highlighting, and completion.
+func (s *appState) buildFileView(th *theme.Theme, path string) fileView {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		content = []byte(fmt.Sprintf("// Error reading %s: %v", path, err))
+	}
+
+	ed := wg.NewEditor(th.Material())
+	ed.WithOptions(
+		gvcode.WithLineNumber(true),
+		gvcode.WithLineNumberGutterGap(unit.Dp(12)),
+		gvcode.WithTextSize(unit.Sp(14)),
+		gvcode.WithLineHeight(0, 1.35),
+		gvcode.WithTabWidth(4),
+	)
+	ed.SetText(string(content))
+
+	// Completion: prefer LSP if a server is configured for this file.
+	// Use completionWrapper so that typing "." or ":" cancels the current session and starts
+	// a new one, causing LSP Suggest() to be called again (e.g. for "fmt." -> Println, Printf).
+	defaultComp := &completion.DefaultCompletion{Editor: ed}
+	cm := &completionWrapper{
+		DefaultCompletion: defaultComp,
+		triggerChars:      map[string]bool{".": true, ":": true},
+	}
+	popup := completion.NewCompletionPopup(ed, cm)
+	popup.Theme = th.Material()
+	popup.TextSize = unit.Sp(12)
+	var lspClient *lsp.Client
+	// Use absolute path so document URI matches what gopls sends in publishDiagnostics.
+	absPath, _ := filepath.Abs(path)
+	docURI := string(lsp.FileURI(absPath))
+	projectRoot := "."
+	if s.lspManager != nil {
+		c, err := s.lspManager.ClientFor(context.Background(), projectRoot, path)
+		if err != nil {
+			log.Printf("[LSP] failed to start client for %q: %v", path, err)
+		}
+		if err == nil && c != nil {
+			lspClient = c
+			log.Printf("[LSP] registered diagnostics handler for %q", path)
+			c.RegisterDiagnosticsHandler(docURI, func(diagnostics []protocol.Diagnostic) {
+				log.Printf("[LSP] received diagnostics for %q: %v", path, diagnostics)
+				s.pendingDiagMu.Lock()
+				s.pendingDiag[path] = diagnostics
+				s.pendingDiagMu.Unlock()
+			})
+			if err := c.DidOpen(context.Background(), protocol.DocumentURI(docURI), lspLanguageID(path), 1, string(content)); err != nil {
+				log.Printf("[LSP] failed to send didOpen for %q: %v", path, err)
+			}
+			if err := cm.AddCompletor(&lsp.Completor{Client: c, DocURI: protocol.DocumentURI(docURI), Editor: ed, ProjectRoot: projectRoot}, popup); err != nil {
+				log.Printf("[LSP] failed to add completor for %q: %v", path, err)
+			}
+			log.Printf("[LSP] added completor for %q", path)
+		}
+	}
+	ed.WithOptions(gvcode.WithAutoCompletion(cm))
+
+	// Build color scheme from chroma style and apply syntax highlighting
+	chromaStyle := styles.Get("dracula")
+	if chromaStyle == nil {
+		chromaStyle = styles.Fallback
+	}
+	gvScheme := buildColorSchemeFromChroma(th.Material(), chromaStyle)
+	ed.WithOptions(gvcode.WithColorScheme(gvScheme))
+
+	originalContent := string(content)
+	tokens := chromaTokensToGvcode(path, originalContent, chromaStyle)
+	if len(tokens) > 0 {
+		ed.SetSyntaxTokens(tokens...)
+	}
+
+	docVersion := int32(1)
+	onChange := func(currentContent string) {
+		if tab := s.openTabs[path]; tab != nil {
+			if currentContent == originalContent {
+				tab.State = tabs.TabStateClean
+			} else {
+				tab.State = tabs.TabStateDirty
+			}
+		}
+	}
+
+	fv := fileView{
+		Title:           path,
+		Path:            path,
+		Editor:          ed,
+		OriginalContent: originalContent,
+		OnChange:        onChange,
+		LSPClient:       lspClient,
+		LSPDocURI:       docURI,
+		DocVersion:      docVersion,
+		Layout: func(gtx layout.Context, th *theme.Theme) layout.Dimensions {
+			// Apply any pending LSP diagnostics (from background callback)
+			s.pendingDiagMu.Lock()
+			pending := s.pendingDiag[path]
+			delete(s.pendingDiag, path)
+			s.pendingDiagMu.Unlock()
+			if len(pending) > 0 {
+				log.Printf("[LSP] applying diagnostics for %q: %v", path, pending)
+				applyDiagnostics(ed, pending)
+			}
+			for {
+				evt, ok := ed.Update(gtx)
+				if !ok {
+					break
+				}
+				if _, isChange := evt.(gvcode.ChangeEvent); isChange {
+					if onChange != nil {
+						onChange(ed.Text())
+					}
+					if lspClient != nil {
+						docVersion++
+						text := ed.Text()
+						_ = lspClient.DidChange(context.Background(), protocol.DocumentURI(docURI), docVersion, text)
+						_ = lspClient.DidSave(context.Background(), protocol.DocumentURI(docURI), text)
+					}
+					ed.OnTextEdit()
+					tokens := chromaTokensToGvcode(path, ed.Text(), chromaStyle)
+					if len(tokens) > 0 {
+						ed.SetSyntaxTokens(tokens...)
+					}
+				}
+			}
+			return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return ed.Layout(gtx, th.Material().Shaper)
+			})
+		},
+	}
+	return fv
+}
+
+// lspLanguageID returns a simple language ID from file extension for LSP.
+func lspLanguageID(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".go":
+		return "go"
+	case ".py":
+		return "python"
+	default:
+		return "plaintext"
+	}
+}
+
+// applyDiagnostics converts LSP diagnostics to gvcode decorations (squiggles) and applies them.
+func applyDiagnostics(ed *gvcode.Editor, diagnostics []protocol.Diagnostic) {
+	text := ed.Text()
+	ed.ClearDecorations(lsp.DecorationSource)
+	if len(diagnostics) == 0 {
+		return
+	}
+	maxRune := len([]rune(text))
+	decos := make([]decoration.Decoration, 0, len(diagnostics))
+	for _, d := range diagnostics {
+		start, end := lsp.RangeToRuneOffsets(text, d.Range)
+		if start < 0 {
+			start = 0
+		}
+		if end > maxRune {
+			end = maxRune
+		}
+		if start >= end {
+			// Zero-length range (e.g. line-only diagnostics): underline at least one character so it's visible
+			end = start + 1
+			if end > maxRune {
+				end = maxRune
+			}
+			if start >= end {
+				continue
+			}
+		}
+		c := errorColor
+		if d.Severity == protocol.DiagnosticSeverityWarning {
+			c = warningColor
+		}
+		decos = append(decos, decoration.Decoration{
+			Source:   lsp.DecorationSource,
+			Start:    start,
+			End:      end,
+			Squiggle: &decoration.Squiggle{Color: gvcolor.MakeColor(c)},
+		})
+	}
+		if len(decos) > 0 {
+			if err := ed.AddDecorations(decos...); err != nil {
+				log.Printf("[LSP] AddDecorations failed: %v", err)
+			}
+		}
+}
 
 var (
-	EditorViewID = view.NewViewID("EditorView")
+	errorColor   = color.NRGBA{R: 0xf4, G: 0x43, B: 0x36, A: 0xff}
+	warningColor = color.NRGBA{R: 0xff, G: 0x98, B: 0x00, A: 0xff}
 )
 
-const (
-	syntaxPattern = "package|import|type|func|struct|for|var|switch|case|if|else"
-)
+// buildColorSchemeFromChroma creates a gvcode ColorScheme from a chroma style.
+func buildColorSchemeFromChroma(mat *material.Theme, chromaStyle *chroma.Style) syntax.ColorScheme {
+	cs := syntax.ColorScheme{}
+	cs.Foreground = gvcolor.MakeColor(mat.Fg)
+	cs.Background = gvcolor.MakeColor(mat.Bg)
+	cs.SelectColor = gvcolor.MakeColor(mat.ContrastBg).MulAlpha(0x60)
+	cs.LineColor = gvcolor.MakeColor(mat.ContrastBg).MulAlpha(0x30)
+	cs.LineNumberColor = gvcolor.MakeColor(mat.Fg).MulAlpha(0xb6)
 
-type EditorView struct {
-	*view.BaseView
-
-	name string
-	path string
-
-	state *gvcode.Editor
-
-	lexer     chroma.Lexer
-	codeStyle *chroma.Style
-
-	lang string
-}
-
-func (vw *EditorView) ID() view.ViewID {
-	return EditorViewID
-}
-
-func (vw *EditorView) Title() string {
-	if vw.name != "" {
-		return vw.name
-	}
-
-	return "Untitled"
-}
-
-func (vw *EditorView) OnNavTo(intent view.Intent) error {
-	if err := vw.BaseView.OnNavTo(intent); err != nil {
-		return err
-	}
-
-	fmt.Println("EditorView.OnNavTo", intent)
-
-	if name, ok := intent.Params["name"]; ok {
-		vw.name = name.(string)
-
-		if vw.lexer == nil {
-			vw.lexer = getLexer(vw.name)
-		}
-	}
-
-	if path, ok := intent.Params["path"]; ok {
-		vw.path = path.(string)
-		thisFile, _ := os.ReadFile(vw.path)
-		vw.state.SetText(string(thisFile))
-		vw.state.UpdateTextStyles(vw.HightlightTextByPattern(vw.state.Text(), syntaxPattern))
-	}
-
-	return nil
-}
-
-func (vw *EditorView) Layout(gtx layout.Context, th *theme.Theme) layout.Dimensions {
-	for {
-		evt, ok := vw.state.Update(gtx)
-		if !ok {
-			break
-		}
-
-		switch evt.(type) {
-		case gvcode.ChangeEvent:
-			styles := vw.HightlightTextByPattern(vw.state.Text(), syntaxPattern)
-			vw.state.UpdateTextStyles(styles)
-		}
-	}
-
-	return layout.Flex{
-		Axis: layout.Vertical,
-	}.Layout(gtx,
-		layout.Flexed(1, func(gtx C) D {
-			borderColor := color.NRGBA{R: 50, G: 52, B: 56, A: 0xab}
-			return widget.Border{
-				Color: borderColor, Width: unit.Dp(1),
-			}.Layout(gtx, func(gtx C) D {
-				return layout.Inset{
-					Top:    unit.Dp(6),
-					Bottom: unit.Dp(6),
-					Left:   unit.Dp(24),
-					Right:  unit.Dp(24),
-				}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					es := wg.NewEditor(th.Theme, vw.state)
-					es.Font.Typeface = "Source Code Pro"
-					es.TextSize = unit.Sp(14)
-					es.LineHeightScale = 1.5
-					es.TextHighlightColor = color.NRGBA{R: 120, G: 120, B: 120, A: 200}
-
-					return es.Layout(gtx)
-				})
-			})
-		}),
-		layout.Rigid(func(gtx C) D {
-			line, col := vw.state.CaretPos()
-			lb := material.Label(th.Theme, th.TextSize*0.8, fmt.Sprintf("Line:%d, Col:%d ", line+1, col+1))
-			lb.Alignment = text.End
-			return lb.Layout(gtx)
-		}),
-	)
-}
-
-func (va *EditorView) OnFinish() {
-	va.BaseView.OnFinish()
-	// Put your cleanup code here.
-}
-
-func NewEditorView() view.View {
-	v := &EditorView{
-		BaseView: &view.BaseView{},
-	}
-
-	style := styles.Get("dracula")
-	if style == nil {
-		style = styles.Fallback
-	}
-
-	v.codeStyle = style
-
-	v.state = &gvcode.Editor{}
-	v.state.WithOptions(
-		gvcode.WrapLine(true),
-	)
-
-	var quotePairs = map[rune]rune{
-		'\'': '\'',
-		'"':  '"',
-		'`':  '`',
-		'“':  '”',
-	}
-
-	// Bracket pairs
-	var bracketPairs = map[rune]rune{
-		'(': ')',
-		'{': '}',
-		'[': ']',
-		'<': '>',
-	}
-
-	v.state.WithOptions(
-		gvcode.WithSoftTab(true),
-		gvcode.WithQuotePairs(quotePairs),
-		gvcode.WithBracketPairs(bracketPairs),
-	)
-
-	return v
-}
-
-func (vw *EditorView) HightlightTextByPattern(text string, pattern string) []*gvcode.TextStyle {
-	// nolint:prealloc
-	var textStyles []*gvcode.TextStyle
-
-	offset := 0
-
-	iterator, err := vw.lexer.Tokenise(nil, text)
-	if err != nil {
-		return textStyles
-	}
-
-	for _, token := range iterator.Tokens() {
-		entry := vw.codeStyle.Get(token.Type)
-
-		textStyle := &gvcode.TextStyle{
-			TextRange: gvcode.TextRange{
-				Start: offset,
-				End:   offset + len([]rune(token.Value)),
-			},
-			Color: rgbaToOp(color.NRGBA{}),
-			// Background: rgbToOp(c.theme.Bg),
-		}
-
+	for _, tt := range []chroma.TokenType{
+		chroma.Keyword, chroma.KeywordConstant, chroma.KeywordDeclaration, chroma.KeywordType,
+		chroma.Name, chroma.NameBuiltin, chroma.NameFunction, chroma.NameVariable,
+		chroma.LiteralString, chroma.LiteralStringChar, chroma.LiteralStringEscape,
+		chroma.LiteralNumber, chroma.LiteralNumberInteger, chroma.LiteralNumberFloat,
+		chroma.Comment, chroma.CommentSingle, chroma.CommentMultiline,
+		chroma.Operator, chroma.Punctuation,
+		chroma.Text, chroma.Whitespace,
+	} {
+		entry := chromaStyle.Get(tt)
 		if entry.Colour.IsSet() {
-			textStyle.Color = chromaColorToOp(entry.Colour)
+			fg := gvcolor.MakeColor(color.NRGBA{
+				R: entry.Colour.Red(),
+				G: entry.Colour.Green(),
+				B: entry.Colour.Blue(),
+				A: 255,
+			})
+			cs.AddStyle(syntax.StyleScope(tt.String()), 0, fg, gvcolor.Color{})
 		}
-
-		textStyles = append(textStyles, textStyle)
-		offset = textStyle.End
 	}
-
-	return textStyles
+	return cs
 }
 
-func rgbaToOp(textColor color.NRGBA) op.CallOp {
-	ops := new(op.Ops)
+// chromaTokensToGvcode tokenizes content with chroma and returns gvcode syntax tokens.
+func chromaTokensToGvcode(filename, content string, _ *chroma.Style) []syntax.Token {
+	lexer := lexers.Match(filename)
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+	lexer = chroma.Coalesce(lexer)
 
-	m := op.Record(ops)
-	paint.ColorOp{Color: textColor}.Add(ops)
-	return m.Stop()
-}
-
-func chromaColorToOp(textColor chroma.Colour) op.CallOp {
-	ops := new(op.Ops)
-
-	m := op.Record(ops)
-	paint.ColorOp{Color: color.NRGBA{
-		R: textColor.Red(),
-		G: textColor.Green(),
-		B: textColor.Blue(),
-		A: 0xff,
-	}}.Add(ops)
-	return m.Stop()
-}
-
-func getLexer(filename string) chroma.Lexer {
-	if filename == "" {
-		return lexers.Fallback
+	it, err := lexer.Tokenise(nil, content)
+	if err != nil {
+		return nil
 	}
 
-	if lexer := lexers.Match(filename); lexer != nil {
-		return chroma.Coalesce(lexer)
+	var tokens []syntax.Token
+	runeOffset := 0
+	for t := it(); t != chroma.EOF; t = it() {
+		if t.Value == "" {
+			continue
+		}
+		start := runeOffset
+		runeOffset += utf8.RuneCountInString(t.Value)
+		end := runeOffset
+		scope := syntax.StyleScope(t.Type.String())
+		if scope.IsValid() {
+			tokens = append(tokens, syntax.Token{Start: start, End: end, Scope: scope})
+		}
 	}
-
-	return lexers.Fallback
-}
-
-func detectFromFileName(fileName string) string {
-	if fileName == "" {
-		return ""
-	}
-
-	return ""
+	return tokens
 }
