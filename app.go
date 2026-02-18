@@ -50,7 +50,7 @@ type appState struct {
 	tabToPath     map[*tabs.Tab]string // tab -> path for close callback
 	lspManager    *lsp.Manager
 	pendingDiag   map[string][]protocol.Diagnostic // path -> diagnostics to apply (set by LSP callback)
-	pendingDiagMu  sync.Mutex
+	pendingDiagMu sync.Mutex
 	currentDiag   map[string][]protocol.Diagnostic // path -> last applied diagnostics (for hover tooltip)
 }
 
@@ -156,6 +156,12 @@ func (s *appState) appLayout(gtx layout.Context) {
 func (s *appState) layoutLeftPanel(gtx layout.Context) layout.Dimensions {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			// Check New File click before laying out the actionbar; otherwise the
+			// button's Layout consumes the click in its internal update loop and
+			// Clicked() never sees it.
+			if s.NewFileClickable.Clicked(gtx) {
+				s.openNewFile()
+			}
 			return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return s.actionbar.Layout(gtx, s.theme)
 			})

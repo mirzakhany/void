@@ -74,7 +74,11 @@ func (s *appState) buildFileNode(th *theme.Theme, entry os.DirEntry, parentPath 
 
 // onFileNodeClick handles file/directory clicks in the tree (opens files as tabs).
 func (s *appState) onFileNodeClick(node *treeview.Node) {
-	path := node.ID
+	s.openFileAsTab(node.ID)
+}
+
+// openFileAsTab opens a file at path in a new tab, or selects the tab if already open.
+func (s *appState) openFileAsTab(path string) {
 	if _, ok := s.openFiles[path]; ok {
 		if tab := s.openTabs[path]; tab != nil {
 			s.tabitems.SelectTab(tab)
@@ -92,15 +96,15 @@ func (s *appState) onFileNodeClick(node *treeview.Node) {
 	})
 
 	t.OnCloseFunc = func(tab *tabs.Tab) bool {
-		path := s.tabToPath[tab]
-		if fv, ok := s.openFiles[path]; ok && fv.LSPClient != nil {
+		p := s.tabToPath[tab]
+		if fv, ok := s.openFiles[p]; ok && fv.LSPClient != nil {
 			_ = fv.LSPClient.DidClose(context.Background(), protocol.DocumentURI(fv.LSPDocURI))
 			fv.LSPClient.UnregisterDiagnosticsHandler(fv.LSPDocURI)
 		}
-		delete(s.openFiles, path)
-		delete(s.openTabs, path)
+		delete(s.openFiles, p)
+		delete(s.openTabs, p)
 		delete(s.tabToPath, tab)
-		if i := slices.Index(s.openPaths, path); i >= 0 {
+		if i := slices.Index(s.openPaths, p); i >= 0 {
 			s.openPaths = slices.Delete(s.openPaths, i, i+1)
 		}
 		return true
@@ -111,4 +115,19 @@ func (s *appState) onFileNodeClick(node *treeview.Node) {
 	s.openTabs[path] = t
 	s.openPaths = append(s.openPaths, path)
 	s.tabToPath[t] = path
+}
+
+// nextUntitledPath returns a unique path for a new file (e.g. "untitled-1", "untitled-2").
+func (s *appState) nextUntitledPath() string {
+	for i := 1; ; i++ {
+		path := fmt.Sprintf("untitled-%d", i)
+		if _, ok := s.openFiles[path]; !ok {
+			return path
+		}
+	}
+}
+
+// openNewFile creates a new untitled buffer and opens it in a tab.
+func (s *appState) openNewFile() {
+	s.openFileAsTab(s.nextUntitledPath())
 }

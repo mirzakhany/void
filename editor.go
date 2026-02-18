@@ -52,11 +52,18 @@ func (w *completionWrapper) OnText(ctx gvcode.CompletionContext) {
 }
 
 // buildFileView creates a fileView for the given path with editor, syntax highlighting, and completion.
+// For non-existent paths (e.g. new files like "untitled-1"), content is empty.
 func (s *appState) buildFileView(th *theme.Theme, path string) fileView {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		content = []byte(fmt.Sprintf("// Error reading %s: %v", path, err))
+	var content []byte
+	if _, err := os.Stat(path); err == nil {
+		// Path exists, read it
+		var err error
+		content, err = os.ReadFile(path)
+		if err != nil {
+			content = []byte(fmt.Sprintf("// Error reading %s: %v", path, err))
+		}
 	}
+	// Else: path doesn't exist (new file) → empty content
 
 	ed := wg.NewEditor(th.Material())
 	ed.WithOptions(
