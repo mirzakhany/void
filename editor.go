@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"image"
 	"image/color"
 	"log"
 	"os"
@@ -11,6 +12,9 @@ import (
 	"unicode/utf8"
 
 	"gioui.org/layout"
+	"gioui.org/op"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget/material"
 	"github.com/alecthomas/chroma/v2"
@@ -145,6 +149,9 @@ func (s *appState) buildFileView(th *theme.Theme, path string) fileView {
 			if len(pending) > 0 {
 				log.Printf("[LSP] applying diagnostics for %q: %v", path, pending)
 				applyDiagnostics(ed, pending)
+				// Keep a copy for hover tooltip lookup.
+				s.currentDiag[path] = make([]protocol.Diagnostic, len(pending))
+				copy(s.currentDiag[path], pending)
 			}
 			for {
 				evt, ok := ed.Update(gtx)
@@ -169,7 +176,16 @@ func (s *appState) buildFileView(th *theme.Theme, path string) fileView {
 				}
 			}
 			return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return ed.Layout(gtx, th.Material().Shaper)
+				dims := ed.Layout(gtx, th.Material().Shaper)
+				// Show diagnostic hover when caret is inside an LSP diagnostic range.
+				if diag := diagnosticAtCaret(ed, s.currentDiag[path]); diag != nil {
+					caret := ed.CaretCoords()
+					pos := image.Pt(int(caret.X), int(caret.Y))
+					ed.PaintOverlay(gtx, pos, func(gtx layout.Context) layout.Dimensions {
+						return layoutDiagnosticTooltip(gtx, th, diag)
+					})
+				}
+				return dims
 			})
 		},
 	}
@@ -232,6 +248,94 @@ func applyDiagnostics(ed *gvcode.Editor, diagnostics []protocol.Diagnostic) {
 			log.Printf("[LSP] AddDecorations failed: %v", err)
 		}
 	}
+}
+
+// diagnosticAtCaret returns the first LSP diagnostic whose range contains the editor's caret (by rune offset).
+func diagnosticAtCaret(ed *gvcode.Editor, diagnostics []protocol.Diagnostic) *protocol.Diagnostic {
+	if len(diagnostics) == 0 {
+		return nil
+	}
+	line, col := ed.CaretPos()
+	runeOff, _ := ed.ConvertPos(line, col)
+	text := ed.Text()
+	maxRune := len([]rune(text))
+	for i := range diagnostics {
+		d := &diagnostics[i]
+		start, end := lsp.RangeToRuneOffsets(text, d.Range)
+		if start < 0 {
+			start = 0
+		}
+		if end > maxRune {
+			end = maxRune
+		}
+		if start >= end {
+			end = start + 1
+		}
+		if runeOff >= start && runeOff < end {
+			return d
+		}
+	}
+	return nil
+}
+
+// layoutDiagnosticTooltip draws a small tooltip with the diagnostic message and optional source/code.
+func layoutDiagnosticTooltip(gtx layout.Context, th *theme.Theme, d *protocol.Diagnostic) layout.Dimensions {
+	mat := th.Material()
+	msg := d.Message
+	if msg == "" {
+		msg = "(no message)"
+	}
+	severityLabel := "Error"
+	if d.Severity == protocol.DiagnosticSeverityWarning {
+		severityLabel = "Warning"
+	}
+	sub := severityLabel
+	if d.Source != "" {
+		sub += " · " + string(d.Source)
+	}
+	if d.Code != nil {
+		if d.Source != "" {
+			sub += " "
+		}
+		sub += fmt.Sprintf("%v", d.Code)
+	}
+
+	corner := unit.Dp(6)
+	maxWidth := gtx.Dp(unit.Dp(320))
+	maxHeight := gtx.Dp(unit.Dp(200)) // cap height so tooltip stays compact
+	pad := unit.Dp(10)
+	gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, maxWidth+gtx.Dp(pad)*2)
+	gtx.Constraints.Max.Y = min(gtx.Constraints.Max.Y, maxHeight)
+	gtx.Constraints.Min.Y = 0
+
+	content := func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(mat, unit.Sp(12), sub)
+				lbl.Color = th.Base.Secondary
+				return lbl.Layout(gtx)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Spacer{Height: unit.Dp(4)}.Layout(gtx)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(mat, unit.Sp(13), msg)
+				lbl.Color = mat.Fg
+				lbl.MaxLines = 10
+				return lbl.Layout(gtx)
+			}),
+		)
+	}
+
+	macro := op.Record(gtx.Ops)
+	dims := layout.UniformInset(pad).Layout(gtx, content)
+	call := macro.Stop()
+
+	rr := clip.UniformRRect(image.Rectangle{Max: dims.Size}, gtx.Dp(corner))
+	defer rr.Push(gtx.Ops).Pop()
+	paint.Fill(gtx.Ops, th.Base.SurfaceHighlight)
+	call.Add(gtx.Ops)
+	return dims
 }
 
 var (

@@ -48,7 +48,8 @@ type appState struct {
 	tabToPath     map[*tabs.Tab]string // tab -> path for close callback
 	lspManager    *lsp.Manager
 	pendingDiag   map[string][]protocol.Diagnostic // path -> diagnostics to apply (set by LSP callback)
-	pendingDiagMu sync.Mutex
+	pendingDiagMu  sync.Mutex
+	currentDiag   map[string][]protocol.Diagnostic // path -> last applied diagnostics (for hover tooltip)
 }
 
 // fileView represents an open file in the editor.
@@ -94,6 +95,7 @@ func newAppState() *appState {
 	state.tabitems = tabs.NewTabs()
 	state.lspManager = lsp.NewManager(lsp.LoadConfig("."))
 	state.pendingDiag = make(map[string][]protocol.Diagnostic)
+	state.currentDiag = make(map[string][]protocol.Diagnostic)
 
 	// Action bar buttons
 	state.actionbar.AddItem(button.IconButton(state.theme, &state.NewFileClickable, icons.FileAdd, theme.KindPrimary))
