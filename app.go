@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"log"
 	"os"
 	"sync"
 
@@ -184,6 +186,31 @@ func (s *appState) layoutRightPanel(gtx layout.Context) layout.Dimensions {
 			return fv.Layout(gtx, s.theme)
 		}),
 	)
+}
+
+// saveCurrentFile writes the current tab's editor content to disk and updates the tab state.
+func (s *appState) saveCurrentFile() {
+	if s.tabitems.CurrentView() < 0 || s.tabitems.CurrentView() >= len(s.openPaths) {
+		return
+	}
+	path := s.openPaths[s.tabitems.CurrentView()]
+	fv, ok := s.openFiles[path]
+	if !ok {
+		return
+	}
+	content := fv.Editor.Text()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		log.Printf("save %q: %v", path, err)
+		return
+	}
+	fv.OriginalContent = content
+	s.openFiles[path] = fv
+	if tab := s.openTabs[path]; tab != nil {
+		tab.State = tabs.TabStateClean
+	}
+	if fv.LSPClient != nil {
+		_ = fv.LSPClient.DidSave(context.Background(), protocol.DocumentURI(fv.LSPDocURI), content)
+	}
 }
 
 // runApp starts the main application loop.

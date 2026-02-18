@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"gioui.org/io/key"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -31,6 +32,9 @@ import (
 	wg "github.com/oligo/gvcode/widget"
 	"go.lsp.dev/protocol"
 )
+
+// saveCmdTag is the tag for the Cmd+S save command registered with the editor.
+var saveCmdTag struct{}
 
 // completionWrapper wraps DefaultCompletion so that typing a trigger character (e.g. ".")
 // cancels the current session first. That forces a new session and a fresh LSP Suggest()
@@ -114,6 +118,13 @@ func (s *appState) buildFileView(th *theme.Theme, path string) fileView {
 	gvScheme := buildColorSchemeFromChroma(th.Material(), chromaStyle)
 	ed.WithOptions(gvcode.WithColorScheme(gvScheme))
 
+	// Cmd+S / Ctrl+S save shortcut (handled by editor when it has focus)
+	ed.RegisterCommand(&saveCmdTag, key.Filter{Name: "S", Required: key.ModShortcut},
+		func(gtx layout.Context, evt key.Event) gvcode.EditorEvent {
+			s.saveCurrentFile()
+			return nil
+		})
+
 	originalContent := string(content)
 	tokens := chromaTokensToGvcode(path, originalContent, chromaStyle)
 	if len(tokens) > 0 {
@@ -123,7 +134,8 @@ func (s *appState) buildFileView(th *theme.Theme, path string) fileView {
 	docVersion := int32(1)
 	onChange := func(currentContent string) {
 		if tab := s.openTabs[path]; tab != nil {
-			if currentContent == originalContent {
+			fv := s.openFiles[path]
+			if currentContent == fv.OriginalContent {
 				tab.State = tabs.TabStateClean
 			} else {
 				tab.State = tabs.TabStateDirty
@@ -166,7 +178,6 @@ func (s *appState) buildFileView(th *theme.Theme, path string) fileView {
 						docVersion++
 						text := ed.Text()
 						_ = lspClient.DidChange(context.Background(), protocol.DocumentURI(docURI), docVersion, text)
-						_ = lspClient.DidSave(context.Background(), protocol.DocumentURI(docURI), text)
 					}
 					ed.OnTextEdit()
 					tokens := chromaTokensToGvcode(path, ed.Text(), chromaStyle)
