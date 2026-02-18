@@ -16,6 +16,8 @@ github.com/alecthomas/repr v0.5.2/go.mod h1:Fr0507jx4eOXV7AlPV6AVZLYrLIuIeSOWtW5
 github.com/benbjohnson/clock v1.1.0/go.mod h1:J11/hYXuz8f4ySSvYwY0FKfm+ezbsZBKZxNJlLklBHA=
 github.com/chapar-rest/uikit v0.0.0-20260217211046-53b9978d82d3 h1:XhZADikcdTuCihpwcVVPKzJwXZ69P7RBuMH/xy+yjKE=
 github.com/chapar-rest/uikit v0.0.0-20260217211046-53b9978d82d3/go.mod h1:A5/OLrVefE84OkZY+9F0iHSEvLqfrbywScPKaa7aUFA=
+github.com/chapar-rest/uikit v0.0.0-20260218202142-420d694c6b1c h1:87AonDHynJYlCN15J241UJMKQh7DU9bS4wq9iPAHQN8=
+github.com/chapar-rest/uikit v0.0.0-20260218202142-420d694c6b1c/go.mod h1:A5/OLrVefE84OkZY+9F0iHSEvLqfrbywScPKaa7aUFA=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dlclark/regexp2 v1.11.5 h1:Q/sSnsKerHeCkc/jSTNq1oCm7KiVgUMZRDUoRu0JQZQ=

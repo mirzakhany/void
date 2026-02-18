@@ -5,7 +5,7 @@ go 1.25.1
 require (
 	gioui.org v0.9.0
 	github.com/alecthomas/chroma/v2 v2.23.1
-	github.com/chapar-rest/uikit v0.0.0-20260217211046-53b9978d82d3
+	github.com/chapar-rest/uikit v0.0.0-20260218202142-420d694c6b1c
 	github.com/oligo/gvcode v0.4.4
 )
 

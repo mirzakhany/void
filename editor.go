@@ -52,6 +52,7 @@ func (s *appState) buildFileView(th *theme.Theme, path string) fileView {
 
 	ed := wg.NewEditor(th.Material())
 	ed.WithOptions(
+		gvcode.WithFont(EditorFont()),
 		gvcode.WithLineNumber(true),
 		gvcode.WithLineNumberGutterGap(unit.Dp(12)),
 		gvcode.WithTextSize(unit.Sp(14)),
@@ -226,11 +227,11 @@ func applyDiagnostics(ed *gvcode.Editor, diagnostics []protocol.Diagnostic) {
 			Squiggle: &decoration.Squiggle{Color: gvcolor.MakeColor(c)},
 		})
 	}
-		if len(decos) > 0 {
-			if err := ed.AddDecorations(decos...); err != nil {
-				log.Printf("[LSP] AddDecorations failed: %v", err)
-			}
+	if len(decos) > 0 {
+		if err := ed.AddDecorations(decos...); err != nil {
+			log.Printf("[LSP] AddDecorations failed: %v", err)
 		}
+	}
 }
 
 var (
